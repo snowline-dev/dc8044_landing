@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <meta name="description" content="">
+    <meta name="author" content="">
+    <link rel="icon" href="wp-content/themes/dc8044/favicon.ico">
+
+    <title>DC8044 Guide</title>
+
+    <link href="wp-content/themes/dc8044/bootstrap.min.css" rel="stylesheet">
+    <link href="wp-content/themes/dc8044/style.css" rel="stylesheet">
+</head>
+
+<body class="guide-page">
+<div class="guide-body">
+    <div class="page_title">
+        <h2>
+            File Shredders
+        </h2>
+    </div>
+    <p>
+        Good day, dear malware enthusiasts. We begin a review of techniques and technologies often used in various malware. If the article is well received, we’ll try to continue and publish more frequently.
+    </p>
+    <p>
+        Today we will talk about file shredders. A file shredder, analogous to office equipment, performs irreversible file deletion from a disk. Standard OS APIs delete files, but do so as fast as possible. Therefore, the data simply becomes inaccessible but is not physically erased. As a result, it can be recovered using special tools.
+    </p>
+    <p>
+        So what? In the malware world, these tools (shredders) are of practical importance. Let’s look at a couple of scenarios where they may be in demand.
+    </p>
+    <p>
+        Scenario 1: One of your friends (not you, of course) was developing some malicious software. Suddenly, law enforcement shows up wanting to confiscate hardware for forensic analysis. To ensure the analysts don’t find unwanted files, your friend decides to delete them. That’s where the file shredder comes in, to permanently erase everything.
+    </p>
+    <p>
+        Scenario 2: You are analyzing a cryptolocker. The cryptolocker has encrypted your files, and you wonder if it’s possible to recover the original data. If it turns out that strong encryption algorithms were used and the decryption key is unobtainable (within reasonable time), then it’s worth checking whether the original contents were truly deleted. Such knowledge is useful when developing cryptolockers — though we don’t recommend doing that, of course.
+    </p>
+    <p>
+        Naturally, this problem is not new, and ready-made solutions exist. But we're interested in the software implementation — how to write such a tool ourselves or evaluate someone else's code. Let's start with an open-source Python example. The code is taken <a href="https://github.com/bleachbit/bleachbit/blob/master/bleachbit/FileUtilities.py" class="link" target="_blank">from here</a>.
+    </p>
+    <p>
+        Simple and safe data deletion looks like this:
+    </p>
+
+    <div class="code_block">
+        def wipe_write():
+        &#9;size = getsize(path)
+        &#9;try:
+        &#9;&#9;f = open(path, 'wb')
+        &#9;except IOError as e:
+        &#9;if e.errno == errno.EACCES:  # permission denied
+        &#9;&#9;&#9;os.chmod(path, 0o200)  # user write only
+        &#9;&#9;&#9;f = open(path, 'wb')
+        &#9;&#9;else:
+        &#9;&#9;&#9;raise
+        &#9;blanks = chr(0) * 4096
+        &#9;while size > 0:
+        &#9;&#9;f.write(blanks)
+        &#9;&#9;size -= 4096
+        &#9;f.flush()  # flush to OS buffer
+        &#9;os.fsync(f.fileno())  # force write to disk
+        &#9;return f
+    </div>
+
+    <p>
+        But we’re interested in whether the deletion process can be sped up (in case of many files and little time) and how complete such deletion is.
+    </p>
+    <p>
+        Let’s proceed step by step. This <a href="https://www.youtube.com/watch?v=O0Q_OTWHiCY" class="link" target="_blank">video</a> provides a good introduction.
+    </p>
+    <p>
+        Note that some things in the video are simplified or omitted (which is normal for time-limited talks). Moreover, while overwrite standards exist, they differ from other <a href="https://habr.com/ru/post/264429/" class="link" target="_blank">sources</a>.
+    </p>
+    <p>
+        At this stage, you should have familiarized yourself with the suggested video and article, and now understand the following points:
+    </p>
+    <ol>
+        <li>
+            Software-based data deletion is done by overwriting.
+        </li>
+        <li>
+            Standards define how overwriting should occur (e.g., how many times and with what patterns).
+        </li>
+        <li>
+            Truly reliable data deletion is only guaranteed by physical destruction of the medium.
+        </li>
+    </ol>
+
+    <p>This leads to several important conclusions.</p>
+
+    <ol>
+        <li>
+            Truly sensitive data is best stored in the cloud. For example, law enforcement may have difficulty physically accessing a device located in a datacenter in China.
+        </li>
+        <li>
+            Dispose of old USB sticks, SD cards, and hard drives (if no longer in use), since you never know what was once written to them. This doesn’t apply to normally functioning devices.
+        </li>
+        <li>
+            We need code that can effectively and reliably overwrite files before deleting them.
+        </li>
+    </ol>
+
+    <p>
+        Let’s start by defining the overwrite algorithm. We'll use the one described in the Habr article (linked above):
+    </p>
+
+    <div class="code_block">
+        AFSSI S020 (USAF standard) — first pass: all 0s, second pass: all 0xFF, third pass: pseudorandom numbers, followed by verification of 10% of overwritten data.
+    </div>
+
+    <p>
+        If the first and second passes are straightforward, then for the third pass we’ll use a random number generator from the
+        <a href="https://docs.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptgenrandom" class="link" target="_blank">Windows API</a>.
+    </p>
+    <p>
+        Every OS has similar APIs, so we won’t go into detail here. Now, about verification — more on that later.
+    </p>
+    <p>
+        So, wiping involves:
+    </p>
+
+    <ol>
+        <li>Overwrite with 0x00 bytes.</li>
+        <li>Overwrite with 0xFF bytes.</li>
+        <li>Overwrite with pseudorandom bytes generated by cryptographically strong APIs.</li>
+        <li>Delete the overwritten file via standard APIs.</li>
+    </ol>
+
+    <p>
+        Now let’s refine some details. In the video, the speaker shows a hex editor and says “this is what a file looks like.” In reality, it's more complex. Disks have sectors and clusters. A sector is the smallest addressable unit on a disk (like a memory page in virtual memory). File systems work with clusters — composed of multiple sectors.
+    </p>
+    <p>
+        Small files may fit within a single sector — as shown in the presentation. But large files span many clusters, which may not be contiguous. Such disks can be read with a hex editor or programmatically like this:
+    </p>
+
+    <div class="code_block">
+        …you need to use the <span class="red">CreateFile</span> function.
+        If instead of a filename you pass a device name like <span class="red">\\.\PHYSICALDRIVE0</span> (first physical disk),
+        you can read and write sectors via <span class="red">ReadFile</span> and <span class="red">WriteFile</span>.
+        The <span class="red">dwCreationDisposition</span> flag must be <span class="red">OPEN_EXISTING</span>,
+        and <span class="red">dwShareMode</span> should be <span class="red">FILE_SHARE_WRITE</span>.
+        Admin rights are also required, otherwise it won’t work…
+    </div>
+
+    <p>
+        Source: <a href="http://www.you-books.com/book/K-Kasperski/Vosstanovlenie-Dannyh-Prakticheskoe-Rukovodstvo" class="link" target="_blank">you-books.com</a>
+    </p>
+    <p>
+        But modern OSes and languages offer easier file access APIs, which treat file contents as a continuous memory block. Why do we need sector/cluster info? It’s important during verification. We’ll get to that — for now, here’s a helpful diagram:
+    </p>
+    <div class="landing_img"><img src="wp-content/themes/dc8044/photo_2019-07-25_14-16-57.jpg" alt=""/></div>
+    <p>
+        Obviously, beyond file contents, file systems store metadata: names, attributes, and service info. This can’t be easily overwritten. But should we overwrite it? And if so, partially or fully?
+    </p>
+    <p>
+        In case of a cryptolocker, the goal is to replace content with encrypted data. File names and attributes are preserved — so metadata isn't of interest here.
+    </p>
+    <p>
+        But what if we are deleting malware source code? Then we’d want to erase the file names too. It would be suspicious if an analyst finds files named:
+    </p>
+
+    <ul>
+        <li>CryptoLocker.py</li>
+        <li>BootloaderInjector.cpp</li>
+        <li>InfectorPE32.java</li>
+    </ul>
+
+    <p>
+        So, before deletion, files should be renamed. On Windows, use the
+        <a href="https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefile" class="link" target="_blank">MoveFile API</a>.
+    </p>
+    <p>
+        We need to generate a name of the same length as the original using random characters.
+    </p>
+    <p>
+        Another point — file access method. Instead of standard read/write, we’ll use memory-mapped files. On Linux, mapping gives no speed gain, but on Windows it does. For large files (>4GB), we must map in parts, especially on 32-bit systems.
+    </p>
+    <p>
+        About verification. In contrast to the Habr article which suggests verifying 10% of the overwritten content, we’ll use a different method. After all, if we had a copy (e.g. a.txt and b.txt), overwriting b.txt and verifying it won’t prove a.txt is gone. So we’re interested in whether the physical disk location has changed.
+    </p>
+    <p>
+        In Windows, filesystem drivers handle IRP packets, which can be used via
+        <a href="https://docs.microsoft.com/windows/win32/api/winioctl/ni-winioctl-fsctl_get_retrieval_pointers" class="link" target="_blank">this API</a>.
+    </p>
+    <p>
+        We need to get a file handle and pass it to DeviceIoControl. More implementation details can be found <a href="https://bitbucket.org/KulykIevgen/fileshredder/" class="link" target="_blank">here</a>.
+    </p>
+    <p>
+        To build the project, you’ll need Microsoft Visual Studio (2019 Community was used). The build.ps1 script will work if
+        <a href="https://docs.microsoft.com/powershell/module/microsoft.powershell.core/about/about_execution_policies?view=powershell-6" class="link" target="_blank">PowerShell execution policies allow script execution</a>.
+    </p>
+
+    <div class="author">by ARCHANGEL</div>
+</div>
+
+<footer>
+    <a href="index.html" class="link_main">
+        MAIN PAGE
+    </a>
+    <img src="wp-content/themes/dc8044/X_pic.png" alt="" class="img-fluid main_img">
+</footer>
+</body>
+</html>
